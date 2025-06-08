@@ -1,0 +1,161 @@
+<!doctype html>
+<html lang="fr">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="apple-mobile-web-app-capable" content="yes" />
+    <meta
+      name="apple-mobile-web-app-status-bar-style"
+      content="black-translucent"
+    />
+    <meta name="format-detection" content="telephone=no" />
+    <title>Configuration Horloge</title>
+    <style>
+      body {
+        font-family: Arial, sans-serif;
+        background-color: #111;
+        color: #eee;
+        padding: 2em;
+        -webkit-touch-callout: none;
+        -webkit-user-select: none;
+        -webkit-tap-highlight-color: transparent;
+      }
+
+      h1 {
+        color: #00ffd0;
+      }
+      .status {
+        transition: opacity 0.5s ease;
+        opacity: 0;
+        color: lightgreen;
+        position: fixed;
+        bottom: 1em;
+        left: 0;
+        right: 0;
+        text-align: center;
+      }
+      input[type="range"] {
+        width: 200px;
+        max-width: 100%;
+        margin-top: 0.3em;
+        -webkit-appearance: none;
+        background: #444;
+        border-radius: 6px;
+        height: 4px;
+      }
+
+      input[type="range"]::-webkit-slider-thumb {
+        -webkit-appearance: none;
+        width: 18px;
+        height: 18px;
+        border-radius: 50%;
+        background: #00ffd0;
+        cursor: pointer;
+        border: none;
+      }
+
+      label {
+        display: block;
+        margin-top: 1.2em;
+        margin-bottom: 0.3em;
+      }
+
+      input[type="color"],
+      input[type="number"] {
+        background: #222;
+        color: #eee;
+        border: none;
+        padding: 0.4em;
+        border-radius: 6px;
+      }
+
+      input[type="number"] {
+        width: 80px;
+      }
+    </style>
+    <script>
+      function hexToRgb(hex) {
+        hex = hex.replace("#", "");
+        const r = parseInt(hex.substring(0, 2), 16);
+        const g = parseInt(hex.substring(2, 4), 16);
+        const b = parseInt(hex.substring(4, 6), 16);
+        return { r, g, b };
+      }
+
+      function updateAndSend() {
+        const digitColor = document.getElementById("dr_picker").value;
+        const barColor = document.getElementById("br_picker").value;
+        const bri = document.getElementById("bri").value;
+
+        const dc = hexToRgb(digitColor);
+        const bc = hexToRgb(barColor);
+
+        const params = new URLSearchParams({
+          dr: dc.r,
+          dg: dc.g,
+          db: dc.b,
+          br: bc.r,
+          bg: bc.g,
+          bb: bc.b,
+          bri: bri,
+        });
+
+        fetch("/set?" + params.toString(), { method: "GET" })
+          .then(() => {
+            const msg = document.getElementById("status");
+            msg.textContent = "✅ Modifications enregistrées";
+            msg.style.opacity = 1;
+            setTimeout(() => (msg.style.opacity = 0), 2000);
+          })
+          .catch(() => {
+            const msg = document.getElementById("status");
+            msg.textContent = "❌ Échec de l’envoi";
+            msg.style.opacity = 1;
+            setTimeout(() => (msg.style.opacity = 0), 2000);
+          });
+      }
+
+      window.addEventListener("DOMContentLoaded", () => {
+        // Envoie l'heure au démarrage
+        fetch("/set?ts=" + Date.now());
+
+        const drPicker = document.getElementById("dr_picker");
+        const brPicker = document.getElementById("br_picker");
+        drPicker.addEventListener("change", updateAndSend);
+        brPicker.addEventListener("change", updateAndSend);
+        document
+          .getElementById("bri")
+          .addEventListener("change", updateAndSend);
+        const briSlider = document.getElementById("bri");
+        const briVal = document.getElementById("bri_val");
+
+        briSlider.addEventListener("input", () => {
+          briVal.textContent = briSlider.value;
+        });
+        // initialize displayed brightness value
+        briVal.textContent = briSlider.value;
+      });
+    </script>
+  </head>
+  <body>
+    <h1>Configuration Horloge</h1>
+    <form id="configForm" action="/set" method="get">
+      <label for="dr_picker">Couleur Chiffres :</label>
+      <input type="color" id="dr_picker" value="#%02x%02x%02x" />
+      <input type="hidden" id="dr" name="dr" />
+      <input type="hidden" id="dg" name="dg" />
+      <input type="hidden" id="db" name="db" />
+
+      <label for="br_picker">Couleur Barre :</label>
+      <input type="color" id="br_picker" value="#%02x%02x%02x" />
+      <input type="hidden" id="br" name="br" />
+      <input type="hidden" id="bg" name="bg" />
+      <input type="hidden" id="bb" name="bb" />
+
+      <label for="bri">Luminosité :</label>
+      <input type="range" id="bri" name="bri" min="0" max="255" value="%d" />
+      <span id="bri_val">%d</span>
+    </form>
+    <div class="status" id="status"></div>
+  </body>
+</html>
