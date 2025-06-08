@@ -30,3 +30,20 @@ jobs:
     # Runs a single command using the runners shell
     - name: Send greeting
       run: echo "Hello ${{ inputs.name }}"
+      
+    - name: Checkout repo
+      uses: actions/checkout@v4
+      with:
+        submodules: 'recursive'
+
+    - name: esp-idf build
+      uses: espressif/esp-idf-ci-action@v1
+      with:
+        esp_idf_version: v5.4.1
+        target: esp32c3
+
+    - name: Upload build folder
+      uses: actions/upload-artifact@v4
+      with:
+        name: esp32-build
+        path: build
