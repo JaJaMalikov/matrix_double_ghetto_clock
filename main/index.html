@@ -87,8 +87,67 @@
       input[type="number"] {
         width: 100px;
       }
+
+      .knob {
+        width: 120px;
+        height: 120px;
+        border-radius: 50%;
+        border: 6px solid #444;
+        position: relative;
+        margin: 0.5em auto;
+        touch-action: none;
+      }
+
+      .knob-handle {
+        position: absolute;
+        width: 4px;
+        height: 45%;
+        background: #00ffd0;
+        top: 5%;
+        left: 50%;
+        transform-origin: bottom center;
+        transform: rotate(-135deg);
+        border-radius: 2px;
+      }
     </style>
     <script>
+      function createKnob(knobId, inputId, displayId) {
+        const knob = document.getElementById(knobId);
+        const input = document.getElementById(inputId);
+        const handle = knob.querySelector('.knob-handle');
+        const display = document.getElementById(displayId);
+
+        function setFromValue(v) {
+          const deg = (v / 255) * 270 - 135;
+          handle.style.transform = `rotate(${deg}deg)`;
+          input.value = v;
+          if (display) display.textContent = v;
+        }
+
+        function pointerEvent(e) {
+          const rect = knob.getBoundingClientRect();
+          const cx = rect.left + rect.width / 2;
+          const cy = rect.top + rect.height / 2;
+          const angle = Math.atan2(e.clientY - cy, e.clientX - cx);
+          let deg = (angle * 180) / Math.PI + 180;
+          deg = (deg + 225) % 360; // map -135..225
+          if (deg > 270) deg = 270;
+          const val = Math.round((deg / 270) * 255);
+          setFromValue(val);
+          updateAndSend();
+        }
+
+        knob.addEventListener('pointerdown', (e) => {
+          e.preventDefault();
+          pointerEvent(e);
+          knob.setPointerCapture(e.pointerId);
+        });
+        knob.addEventListener('pointermove', (e) => {
+          if (e.buttons) pointerEvent(e);
+        });
+        setFromValue(input.value);
+      }
+
       function hexToRgb(hex) {
         hex = hex.replace("#", "");
         const r = parseInt(hex.substring(0, 2), 16);
@@ -150,6 +209,9 @@
           el.addEventListener("input", () => (span.textContent = el.value));
           span.textContent = el.value;
         });
+        createKnob("digit_bri_knob", "digit_bri", "digit_bri_val");
+        createKnob("bar_bri_knob", "bar_bri", "bar_bri_val");
+        createKnob("torch_bri_knob", "torch_bri", "torch_bri_val");
         document.getElementById("blink").addEventListener("change", updateAndSend);
         document.getElementById("torch").addEventListener("change", updateAndSend);
       });
@@ -171,10 +233,16 @@
       <input type="color" id="br_picker" value="#%02x%02x%02x" />
 
       <label for="digit_bri">Luminosité Chiffres :</label>
+      <div class="knob" id="digit_bri_knob">
+        <div class="knob-handle"></div>
+      </div>
       <input type="range" id="digit_bri" min="0" max="255" value="%d" />
       <span id="digit_bri_val">%d</span>
 
       <label for="bar_bri">Luminosité Barre :</label>
+      <div class="knob" id="bar_bri_knob">
+        <div class="knob-handle"></div>
+      </div>
       <input type="range" id="bar_bri" min="0" max="255" value="%d" />
       <span id="bar_bri_val">%d</span>
 
@@ -182,6 +250,9 @@
 
       <label><input type="checkbox" id="torch" /> Mode lumière</label>
       <label for="torch_bri">Intensité Lumière :</label>
+      <div class="knob" id="torch_bri_knob">
+        <div class="knob-handle"></div>
+      </div>
       <input type="range" id="torch_bri" min="0" max="255" value="%d" />
       <span id="torch_bri_val">%d</span>
     </form>
