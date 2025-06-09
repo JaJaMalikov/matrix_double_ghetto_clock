@@ -83,22 +83,24 @@
       }
 
       function updateAndSend() {
-        const digitColor = document.getElementById("dr_picker").value;
+        const params = new URLSearchParams();
+        for (let i = 0; i < 4; i++) {
+          const c = document.getElementById(`d${i}_picker`).value;
+          const rgb = hexToRgb(c);
+          params.set(`d${i}r`, rgb.r);
+          params.set(`d${i}g`, rgb.g);
+          params.set(`d${i}b`, rgb.b);
+        }
         const barColor = document.getElementById("br_picker").value;
-        const bri = document.getElementById("bri").value;
-
-        const dc = hexToRgb(digitColor);
         const bc = hexToRgb(barColor);
-
-        const params = new URLSearchParams({
-          dr: dc.r,
-          dg: dc.g,
-          db: dc.b,
-          br: bc.r,
-          bg: bc.g,
-          bb: bc.b,
-          bri: bri,
-        });
+        params.set("br", bc.r);
+        params.set("bg", bc.g);
+        params.set("bb", bc.b);
+        params.set("bri", document.getElementById("digit_bri").value);
+        params.set("bar_bri", document.getElementById("bar_bri").value);
+        params.set("blink", document.getElementById("blink").checked ? 1 : 0);
+        params.set("torch", document.getElementById("torch").checked ? 1 : 0);
+        params.set("torch_bri", document.getElementById("torch_bri").value);
 
         fetch("/set?" + params.toString(), { method: "GET" })
           .then(() => {
@@ -119,42 +121,54 @@
         // Envoie l'heure au démarrage
         fetch("/set?ts=" + Date.now());
 
-        const drPicker = document.getElementById("dr_picker");
+        for (let i = 0; i < 4; i++) {
+          document
+            .getElementById(`d${i}_picker`)
+            .addEventListener("change", updateAndSend);
+        }
         const brPicker = document.getElementById("br_picker");
-        drPicker.addEventListener("change", updateAndSend);
         brPicker.addEventListener("change", updateAndSend);
-        document
-          .getElementById("bri")
-          .addEventListener("change", updateAndSend);
-        const briSlider = document.getElementById("bri");
-        const briVal = document.getElementById("bri_val");
-
-        briSlider.addEventListener("input", () => {
-          briVal.textContent = briSlider.value;
+        ["digit_bri", "bar_bri", "torch_bri"].forEach((id) => {
+          const el = document.getElementById(id);
+          const span = document.getElementById(id + "_val");
+          el.addEventListener("change", updateAndSend);
+          el.addEventListener("input", () => (span.textContent = el.value));
+          span.textContent = el.value;
         });
-        // initialize displayed brightness value
-        briVal.textContent = briSlider.value;
+        document.getElementById("blink").addEventListener("change", updateAndSend);
+        document.getElementById("torch").addEventListener("change", updateAndSend);
       });
     </script>
   </head>
   <body>
     <h1>Configuration Horloge</h1>
     <form id="configForm" action="/set" method="get">
-      <label for="dr_picker">Couleur Chiffres :</label>
-      <input type="color" id="dr_picker" value="#%02x%02x%02x" />
-      <input type="hidden" id="dr" name="dr" />
-      <input type="hidden" id="dg" name="dg" />
-      <input type="hidden" id="db" name="db" />
+      <label>Couleur Chiffre 1 :</label>
+      <input type="color" id="d0_picker" value="#%02x%02x%02x" />
+      <label>Couleur Chiffre 2 :</label>
+      <input type="color" id="d1_picker" value="#%02x%02x%02x" />
+      <label>Couleur Chiffre 3 :</label>
+      <input type="color" id="d2_picker" value="#%02x%02x%02x" />
+      <label>Couleur Chiffre 4 :</label>
+      <input type="color" id="d3_picker" value="#%02x%02x%02x" />
 
       <label for="br_picker">Couleur Barre :</label>
       <input type="color" id="br_picker" value="#%02x%02x%02x" />
-      <input type="hidden" id="br" name="br" />
-      <input type="hidden" id="bg" name="bg" />
-      <input type="hidden" id="bb" name="bb" />
 
-      <label for="bri">Luminosité :</label>
-      <input type="range" id="bri" name="bri" min="0" max="255" value="%d" />
-      <span id="bri_val">%d</span>
+      <label for="digit_bri">Luminosité Chiffres :</label>
+      <input type="range" id="digit_bri" min="0" max="255" value="%d" />
+      <span id="digit_bri_val">%d</span>
+
+      <label for="bar_bri">Luminosité Barre :</label>
+      <input type="range" id="bar_bri" min="0" max="255" value="%d" />
+      <span id="bar_bri_val">%d</span>
+
+      <label><input type="checkbox" id="blink" %s /> Dernier dot clignotant</label>
+
+      <label><input type="checkbox" id="torch" /> Mode lumière</label>
+      <label for="torch_bri">Intensité Lumière :</label>
+      <input type="range" id="torch_bri" min="0" max="255" value="%d" />
+      <span id="torch_bri_val">%d</span>
     </form>
     <div class="status" id="status"></div>
   </body>

@@ -37,13 +37,14 @@ extern const char embedded_index_end[] asm("_binary_index_html_end");
 #define MATRIX_WIDTH 16
 #define MATRIX_HEIGHT 8
 
-static uint8_t digit_color_r = 128;
-static uint8_t digit_color_g = 64;
-static uint8_t digit_color_b = 0;
-static uint8_t bar_color_r = 64;
-static uint8_t bar_color_g = 128;
-static uint8_t bar_color_b = 0;
-static uint8_t brightness = 255;
+static uint8_t digit_color[4][3] = {{128, 64, 0}, {128, 64, 0},
+                                    {128, 64, 0}, {128, 64, 0}};
+static uint8_t bar_color[3] = {64, 128, 0};
+static uint8_t digit_brightness = 255;
+static uint8_t bar_brightness = 255;
+static uint8_t torch_brightness = 255;
+static bool torch_mode = false;
+static bool blink_last_dot = false;
 
 static led_strip_handle_t led_strip;
 static uint8_t led_data[NUM_LEDS * 3];
@@ -65,10 +66,11 @@ const uint8_t font3x5[][5] = {
 };
 
 static void apply_brightness(uint8_t base_r, uint8_t base_g, uint8_t base_b,
-                             uint8_t *out_r, uint8_t *out_g, uint8_t *out_b) {
-  *out_r = (base_r * brightness) / 255;
-  *out_g = (base_g * brightness) / 255;
-  *out_b = (base_b * brightness) / 255;
+                             uint8_t bri, uint8_t *out_r, uint8_t *out_g,
+                             uint8_t *out_b) {
+  *out_r = (base_r * bri) / 255;
+  *out_g = (base_g * bri) / 255;
+  *out_b = (base_b * bri) / 255;
 }
 static void update_led_strip() {
   for (int i = 0; i < NUM_LEDS; i++) {
@@ -85,7 +87,7 @@ static void draw_digit(int x, int y, uint8_t digit, uint8_t r, uint8_t g,
   if (digit > 9)
     return;
   uint8_t adj_r, adj_g, adj_b;
-  apply_brightness(r, g, b, &adj_r, &adj_g, &adj_b);
+  apply_brightness(r, g, b, digit_brightness, &adj_r, &adj_g, &adj_b);
   for (int row = 0; row < 5; row++) {
     uint8_t rowBits = font3x5[digit][row];
     for (int col = 0; col < 3; col++) {
@@ -111,7 +113,7 @@ static void animate_digit_fall(int digit_index, int x, int y, uint8_t oldDigit,
                                uint8_t b) {
   uint8_t backup[NUM_LEDS * 3];
   uint8_t adj_r, adj_g, adj_b;
-  apply_brightness(r, g, b, &adj_r, &adj_g, &adj_b);
+  apply_brightness(r, g, b, digit_brightness, &adj_r, &adj_g, &adj_b);
   memcpy(backup, led_data, sizeof(led_data));
 
   for (int drop = 0; drop <= MATRIX_HEIGHT; drop++) {
@@ -134,8 +136,8 @@ static void animate_digit_fall(int digit_index, int x, int y, uint8_t oldDigit,
     for (int j = 0; j < 4; j++) {
       if (j == digit_index)
         continue;
-      draw_digit(x_coords[j], 1, last_digits[j], digit_color_r, digit_color_g,
-                 digit_color_b);
+      draw_digit(x_coords[j], 1, last_digits[j], digit_color[j][0],
+                 digit_color[j][1], digit_color[j][2]);
     }
     update_led_strip();
     vTaskDelay(pdMS_TO_TICKS(40));
@@ -160,8 +162,8 @@ static void animate_digit_fall(int digit_index, int x, int y, uint8_t oldDigit,
     for (int j = 0; j < 4; j++) {
       if (j == digit_index)
         continue;
-      draw_digit(x_coords[j], 1, last_digits[j], digit_color_r, digit_color_g,
-                 digit_color_b);
+      draw_digit(x_coords[j], 1, last_digits[j], digit_color[j][0],
+                 digit_color[j][1], digit_color[j][2]);
     }
     update_led_strip();
     vTaskDelay(pdMS_TO_TICKS(40));
@@ -170,12 +172,16 @@ static void animate_digit_fall(int digit_index, int x, int y, uint8_t oldDigit,
 
 static void draw_seconds_bar(int seconds, uint8_t r, uint8_t g, uint8_t b) {
   uint8_t adj_r, adj_g, adj_b;
-  apply_brightness(r, g, b, &adj_r, &adj_g, &adj_b);
+  apply_brightness(r, g, b, bar_brightness, &adj_r, &adj_g, &adj_b);
   int tick = (seconds * MATRIX_WIDTH) / 60;
   for (int i = 0; i < MATRIX_WIDTH; i++) {
     int x = i;
     int index = xy_to_index(x, MATRIX_HEIGHT - 1) * 3;
-    if (i < tick) {
+    bool on = i < tick;
+    if (blink_last_dot && i == MATRIX_WIDTH - 1 && (seconds % 2 == 0)) {
+      on = false;
+    }
+    if (on) {
       led_data[index] = adj_g;
       led_data[index + 1] = adj_r;
       led_data[index + 2] = adj_b;
@@ -195,15 +201,27 @@ static void clock_task(void *arg) {
         timeinfo.tm_min / 10, timeinfo.tm_min % 10, timeinfo.tm_hour / 10,
         timeinfo.tm_hour % 10};
     memset(led_data, 0, sizeof(led_data));
-    draw_seconds_bar(timeinfo.tm_sec, bar_color_r, bar_color_g, bar_color_b);
-    for (int i = 0; i < 4; i++) {
-      if (digits[i] != last_digits[i]) {
-        animate_digit_fall(i, x_coords[i], 1, last_digits[i], digits[i],
-                           digit_color_r, digit_color_g, digit_color_b);
-        last_digits[i] = digits[i];
-      } else {
-        draw_digit(x_coords[i], 1, digits[i], digit_color_r, digit_color_g,
-                   digit_color_b);
+    if (torch_mode) {
+      uint8_t r, g, b;
+      apply_brightness(255, 255, 255, torch_brightness, &r, &g, &b);
+      for (int i = 0; i < NUM_LEDS; i++) {
+        int idx = i * 3;
+        led_data[idx] = g;
+        led_data[idx + 1] = r;
+        led_data[idx + 2] = b;
+      }
+    } else {
+      draw_seconds_bar(timeinfo.tm_sec, bar_color[0], bar_color[1], bar_color[2]);
+      for (int i = 0; i < 4; i++) {
+        if (digits[i] != last_digits[i]) {
+          animate_digit_fall(i, x_coords[i], 1, last_digits[i], digits[i],
+                             digit_color[i][0], digit_color[i][1],
+                             digit_color[i][2]);
+          last_digits[i] = digits[i];
+        } else {
+          draw_digit(x_coords[i], 1, digits[i], digit_color[i][0],
+                     digit_color[i][1], digit_color[i][2]);
+        }
       }
     }
     update_led_strip();
@@ -228,9 +246,15 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
   memcpy(html, embedded_index_start, html_len);
   html[html_len] = '\0';
   // Calculer taille nécessaire
-  int needed =
-      snprintf(NULL, 0, html, digit_color_r, digit_color_g, digit_color_b,
-               bar_color_r, bar_color_g, bar_color_b, brightness);
+  int needed = snprintf(NULL, 0, html, digit_color[0][0], digit_color[0][1],
+                        digit_color[0][2], digit_color[1][0],
+                        digit_color[1][1], digit_color[1][2], digit_color[2][0],
+                        digit_color[2][1], digit_color[2][2], digit_color[3][0],
+                        digit_color[3][1], digit_color[3][2], bar_color[0],
+                        bar_color[1], bar_color[2], digit_brightness,
+                        digit_brightness, bar_brightness, bar_brightness,
+                        blink_last_dot ? "checked" : "", torch_brightness,
+                        torch_brightness);
   if (needed < 0) {
     free(html);
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Format error");
@@ -242,8 +266,13 @@ static esp_err_t index_get_handler(httpd_req_t *req) {
     httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
     return ESP_FAIL;
   }
-  snprintf(response, needed + 1, html, digit_color_r, digit_color_g,
-           digit_color_b, bar_color_r, bar_color_g, bar_color_b, brightness);
+  snprintf(response, needed + 1, html, digit_color[0][0], digit_color[0][1],
+           digit_color[0][2], digit_color[1][0], digit_color[1][1],
+           digit_color[1][2], digit_color[2][0], digit_color[2][1],
+           digit_color[2][2], digit_color[3][0], digit_color[3][1],
+           digit_color[3][2], bar_color[0], bar_color[1], bar_color[2],
+           digit_brightness, digit_brightness, bar_brightness, bar_brightness,
+           blink_last_dot ? "checked" : "", torch_brightness, torch_brightness);
   free(html);
   httpd_resp_set_type(req, "text/html");
   httpd_resp_send(req, response, needed);
@@ -269,40 +298,72 @@ static esp_err_t set_get_handler(httpd_req_t *req) {
     set_system_time(client_ts);
   }
 
-  // Lecture des composantes R/G/B chiffres
+  // Lecture des couleurs des chiffres
+  for (int i = 0; i < 4; i++) {
+    char key[5];
+    snprintf(key, sizeof(key), "d%dr", i);
+    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+      digit_color[i][0] = atoi(val);
+    snprintf(key, sizeof(key), "d%dg", i);
+    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+      digit_color[i][1] = atoi(val);
+    snprintf(key, sizeof(key), "d%db", i);
+    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+      digit_color[i][2] = atoi(val);
+  }
   if (httpd_query_key_value(buf, "dr", val, sizeof(val)) == ESP_OK)
-    digit_color_r = atoi(val);
+    for (int i = 0; i < 4; i++)
+      digit_color[i][0] = atoi(val);
   if (httpd_query_key_value(buf, "dg", val, sizeof(val)) == ESP_OK)
-    digit_color_g = atoi(val);
+    for (int i = 0; i < 4; i++)
+      digit_color[i][1] = atoi(val);
   if (httpd_query_key_value(buf, "db", val, sizeof(val)) == ESP_OK)
-    digit_color_b = atoi(val);
+    for (int i = 0; i < 4; i++)
+      digit_color[i][2] = atoi(val);
 
   // Lecture des composantes R/G/B barre
   if (httpd_query_key_value(buf, "br", val, sizeof(val)) == ESP_OK)
-    bar_color_r = atoi(val);
+    bar_color[0] = atoi(val);
   if (httpd_query_key_value(buf, "bg", val, sizeof(val)) == ESP_OK)
-    bar_color_g = atoi(val);
+    bar_color[1] = atoi(val);
   if (httpd_query_key_value(buf, "bb", val, sizeof(val)) == ESP_OK)
-    bar_color_b = atoi(val);
+    bar_color[2] = atoi(val);
 
-  // Lecture de la luminosité
+  // Lecture des luminosités
   if (httpd_query_key_value(buf, "bri", val, sizeof(val)) == ESP_OK)
-    brightness = atoi(val);
+    digit_brightness = atoi(val);
+  if (httpd_query_key_value(buf, "bar_bri", val, sizeof(val)) == ESP_OK)
+    bar_brightness = atoi(val);
+  if (httpd_query_key_value(buf, "torch_bri", val, sizeof(val)) == ESP_OK)
+    torch_brightness = atoi(val);
+  if (httpd_query_key_value(buf, "blink", val, sizeof(val)) == ESP_OK)
+    blink_last_dot = atoi(val);
+  if (httpd_query_key_value(buf, "torch", val, sizeof(val)) == ESP_OK)
+    torch_mode = atoi(val);
 
   // 1) Ouvrir la NVS en lecture/écriture
   nvs_handle_t nvs;
   esp_err_t err = nvs_open("clock", NVS_READWRITE, &nvs);
   if (err == ESP_OK) {
     // 2) Stocker chaque valeur (u8)
-    nvs_set_u8(nvs, "dr", digit_color_r);
-    nvs_set_u8(nvs, "dg", digit_color_g);
-    nvs_set_u8(nvs, "db", digit_color_b);
+    for (int i = 0; i < 4; i++) {
+      char key[5];
+      snprintf(key, sizeof(key), "d%dr", i);
+      nvs_set_u8(nvs, key, digit_color[i][0]);
+      snprintf(key, sizeof(key), "d%dg", i);
+      nvs_set_u8(nvs, key, digit_color[i][1]);
+      snprintf(key, sizeof(key), "d%db", i);
+      nvs_set_u8(nvs, key, digit_color[i][2]);
+    }
 
-    nvs_set_u8(nvs, "br", bar_color_r);
-    nvs_set_u8(nvs, "bg", bar_color_g);
-    nvs_set_u8(nvs, "bb", bar_color_b);
+    nvs_set_u8(nvs, "br", bar_color[0]);
+    nvs_set_u8(nvs, "bg", bar_color[1]);
+    nvs_set_u8(nvs, "bb", bar_color[2]);
 
-    nvs_set_u8(nvs, "bri", brightness);
+    nvs_set_u8(nvs, "bri", digit_brightness);
+    nvs_set_u8(nvs, "bar_bri", bar_brightness);
+    nvs_set_u8(nvs, "tbri", torch_brightness);
+    nvs_set_u8(nvs, "blink", blink_last_dot);
 
     // 3) Valider l’écriture
     nvs_commit(nvs);
@@ -311,9 +372,14 @@ static esp_err_t set_get_handler(httpd_req_t *req) {
     ESP_LOGW(TAG, "NVS open (RW) failed (%s)", esp_err_to_name(err));
   }
 
-  ESP_LOGI(TAG, "SET: dr=%d dg=%d db=%d | br=%d bg=%d bb=%d | bri=%d",
-           digit_color_r, digit_color_g, digit_color_b, bar_color_r,
-           bar_color_g, bar_color_b, brightness);
+  ESP_LOGI(TAG,
+           "SET: d0=%d,%d,%d d1=%d,%d,%d d2=%d,%d,%d d3=%d,%d,%d | bar=%d,%d,%d "
+           "| bri=%d bar_bri=%d torch=%d" , digit_color[0][0], digit_color[0][1],
+           digit_color[0][2], digit_color[1][0], digit_color[1][1],
+           digit_color[1][2], digit_color[2][0], digit_color[2][1],
+           digit_color[2][2], digit_color[3][0], digit_color[3][1],
+           digit_color[3][2], bar_color[0], bar_color[1], bar_color[2],
+           digit_brightness, bar_brightness, torch_brightness);
 
   httpd_resp_set_status(req, "204 No Content");
   httpd_resp_send(req, NULL, 0);
@@ -430,22 +496,34 @@ void app_main(void) {
     // Lecture de chaque paramètre (u8). Si non trouvée, on laisse la valeur par
     // défaut.
     uint8_t tmp;
-    if (nvs_get_u8(nvs, "dr", &tmp) == ESP_OK)
-      digit_color_r = tmp;
-    if (nvs_get_u8(nvs, "dg", &tmp) == ESP_OK)
-      digit_color_g = tmp;
-    if (nvs_get_u8(nvs, "db", &tmp) == ESP_OK)
-      digit_color_b = tmp;
+    for (int i = 0; i < 4; i++) {
+      char key[5];
+      snprintf(key, sizeof(key), "d%dr", i);
+      if (nvs_get_u8(nvs, key, &tmp) == ESP_OK)
+        digit_color[i][0] = tmp;
+      snprintf(key, sizeof(key), "d%dg", i);
+      if (nvs_get_u8(nvs, key, &tmp) == ESP_OK)
+        digit_color[i][1] = tmp;
+      snprintf(key, sizeof(key), "d%db", i);
+      if (nvs_get_u8(nvs, key, &tmp) == ESP_OK)
+        digit_color[i][2] = tmp;
+    }
 
     if (nvs_get_u8(nvs, "br", &tmp) == ESP_OK)
-      bar_color_r = tmp;
+      bar_color[0] = tmp;
     if (nvs_get_u8(nvs, "bg", &tmp) == ESP_OK)
-      bar_color_g = tmp;
+      bar_color[1] = tmp;
     if (nvs_get_u8(nvs, "bb", &tmp) == ESP_OK)
-      bar_color_b = tmp;
+      bar_color[2] = tmp;
 
     if (nvs_get_u8(nvs, "bri", &tmp) == ESP_OK)
-      brightness = tmp;
+      digit_brightness = tmp;
+    if (nvs_get_u8(nvs, "bar_bri", &tmp) == ESP_OK)
+      bar_brightness = tmp;
+    if (nvs_get_u8(nvs, "tbri", &tmp) == ESP_OK)
+      torch_brightness = tmp;
+    if (nvs_get_u8(nvs, "blink", &tmp) == ESP_OK)
+      blink_last_dot = tmp;
 
     nvs_close(nvs);
   } else {
