@@ -178,8 +178,8 @@ static void draw_seconds_bar(int seconds, uint8_t r, uint8_t g, uint8_t b) {
     int x = i;
     int index = xy_to_index(x, MATRIX_HEIGHT - 1) * 3;
     bool on = i < tick;
-    if (blink_last_dot && i == MATRIX_WIDTH - 1 && (seconds % 2 == 0)) {
-      on = false;
+    if (blink_last_dot && i == MATRIX_WIDTH - 1 && tick == MATRIX_WIDTH - 1) {
+      on = (seconds % 2) != 0;
     }
     if (on) {
       led_data[index] = adj_g;
