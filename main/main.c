@@ -1,16 +1,14 @@
-#include "dns_server.h"
 #include "esp_event.h"
-#include "esp_http_server.h"
 #include "esp_log.h"
 #include "esp_mac.h"
-#include "esp_netif.h"
-#include "esp_netif_ip_addr.h"
-#include "esp_wifi.h"
-#include "esp_wifi_default.h"
+#include "esp_bt.h"
+#include "esp_gap_ble_api.h"
+#include "esp_gatts_api.h"
+#include "esp_bt_main.h"
+#include "esp_gatt_common_api.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "led_strip.h"
-#include "lwip/inet.h"
 #include "nvs.h"
 #include "nvs_flash.h"
 #include "sdkconfig.h"
@@ -19,13 +17,6 @@
 #include <sys/param.h>
 #include <sys/time.h>
 #include <time.h>
-
-#define EXAMPLE_ESP_WIFI_SSID CONFIG_ESP_WIFI_SSID
-#define EXAMPLE_ESP_WIFI_PASS CONFIG_ESP_WIFI_PASSWORD
-#define EXAMPLE_MAX_STA_CONN CONFIG_ESP_MAX_STA_CONN
-
-extern const char embedded_index_start[] asm("_binary_index_html_start");
-extern const char embedded_index_end[] asm("_binary_index_html_end");
 
 #define TAG "CLOCK"
 #if CONFIG_IDF_TARGET_ESP32C3
@@ -36,6 +27,42 @@ extern const char embedded_index_end[] asm("_binary_index_html_end");
 #define NUM_LEDS 128
 #define MATRIX_WIDTH 16
 #define MATRIX_HEIGHT 8
+
+#define CONFIG_SERVICE_UUID 0xFFF0
+#define CONFIG_CHAR_UUID 0xFFF1
+
+static uint16_t config_service_handle;
+static uint16_t config_char_handle;
+
+static esp_ble_adv_params_t adv_params = {
+    .adv_int_min = 0x20,
+    .adv_int_max = 0x40,
+    .adv_type = ADV_TYPE_IND,
+    .own_addr_type = BLE_ADDR_TYPE_PUBLIC,
+    .channel_map = ADV_CHNL_ALL,
+    .adv_filter_policy = ADV_FILTER_ALLOW_SCAN_ANY_CON_ANY,
+};
+
+static uint16_t service_uuid = CONFIG_SERVICE_UUID;
+static esp_ble_adv_data_t adv_data = {
+    .set_scan_rsp = false,
+    .include_name = true,
+    .service_uuid_len = sizeof(service_uuid),
+    .p_service_uuid = (uint8_t *)&service_uuid,
+    .flag = ESP_BLE_ADV_FLAG_GEN_DISC | ESP_BLE_ADV_FLAG_BREDR_NOT_SPT,
+};
+
+static esp_gatt_srvc_id_t service_id = {
+    .is_primary = true,
+    .id = {.uuid = {.len = ESP_UUID_LEN_16, .uuid = {.uuid16 = CONFIG_SERVICE_UUID}}, .inst_id = 0},
+};
+
+static esp_bt_uuid_t char_uuid = {.len = ESP_UUID_LEN_16, .uuid = {.uuid16 = CONFIG_CHAR_UUID}};
+
+static bool query_get_value(const char *buf, const char *key, char *out,
+                            size_t len);
+static void apply_query_config(const char *buf);
+static void ble_init(void);
 
 static uint8_t digit_color[4][3] = {{128, 64, 0}, {128, 64, 0},
                                     {128, 64, 0}, {128, 64, 0}};
@@ -236,63 +263,28 @@ static void set_system_time(uint64_t timestamp_ms) {
   settimeofday(&tv, NULL);
 }
 
-static esp_err_t index_get_handler(httpd_req_t *req) {
-  size_t html_len = embedded_index_end - embedded_index_start;
-  char *html = malloc(html_len + 1);
-  if (!html) {
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
-    return ESP_FAIL;
-  }
-  memcpy(html, embedded_index_start, html_len);
-  html[html_len] = '\0';
-  // Calculer taille nécessaire
-  int needed = snprintf(NULL, 0, html, digit_color[0][0], digit_color[0][1],
-                        digit_color[0][2], digit_color[1][0],
-                        digit_color[1][1], digit_color[1][2], digit_color[2][0],
-                        digit_color[2][1], digit_color[2][2], digit_color[3][0],
-                        digit_color[3][1], digit_color[3][2], bar_color[0],
-                        bar_color[1], bar_color[2], digit_brightness,
-                        digit_brightness, bar_brightness, bar_brightness,
-                        blink_last_dot ? "checked" : "", torch_brightness,
-                        torch_brightness);
-  if (needed < 0) {
-    free(html);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Format error");
-    return ESP_FAIL;
-  }
-  char *response = malloc(needed + 1);
-  if (!response) {
-    free(html);
-    httpd_resp_send_err(req, HTTPD_500_INTERNAL_SERVER_ERROR, "Memory error");
-    return ESP_FAIL;
-  }
-  snprintf(response, needed + 1, html, digit_color[0][0], digit_color[0][1],
-           digit_color[0][2], digit_color[1][0], digit_color[1][1],
-           digit_color[1][2], digit_color[2][0], digit_color[2][1],
-           digit_color[2][2], digit_color[3][0], digit_color[3][1],
-           digit_color[3][2], bar_color[0], bar_color[1], bar_color[2],
-           digit_brightness, digit_brightness, bar_brightness, bar_brightness,
-           blink_last_dot ? "checked" : "", torch_brightness, torch_brightness);
-  free(html);
-  httpd_resp_set_type(req, "text/html");
-  httpd_resp_send(req, response, needed);
-  free(response);
-  return ESP_OK;
+static bool query_get_value(const char *buf, const char *key, char *out,
+                           size_t len) {
+  const char *p = strstr(buf, key);
+  if (!p)
+    return false;
+  p += strlen(key);
+  if (*p != '=')
+    return false;
+  p++;
+  const char *end = strchr(p, '&');
+  size_t l = end ? (size_t)(end - p) : strlen(p);
+  if (l >= len)
+    l = len - 1;
+  memcpy(out, p, l);
+  out[l] = '\0';
+  return true;
 }
 
-static esp_err_t set_get_handler(httpd_req_t *req) {
-  char buf[128];
-  size_t len = httpd_req_get_url_query_len(req);
-  if (len < 1) {
-    httpd_resp_send(req, "No query received", HTTPD_RESP_USE_STRLEN);
-    return ESP_OK;
-  }
-  httpd_req_get_url_query_str(req, buf, len + 1);
-
+static void apply_query_config(const char *buf) {
   char val[16];
 
-  // Lecture du timestamp client (exemple déjà expliqué précédemment)
-  if (httpd_query_key_value(buf, "ts", val, sizeof(val)) == ESP_OK) {
+  if (query_get_value(buf, "ts", val, sizeof(val))) {
     uint64_t client_ts = atoll(val);
     ESP_LOGI(TAG, "CLIENT_TIME: %llu", client_ts);
     set_system_time(client_ts);
@@ -302,43 +294,43 @@ static esp_err_t set_get_handler(httpd_req_t *req) {
   for (int i = 0; i < 4; i++) {
     char key[5];
     snprintf(key, sizeof(key), "d%dr", i);
-    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+    if (query_get_value(buf, key, val, sizeof(val)))
       digit_color[i][0] = atoi(val);
     snprintf(key, sizeof(key), "d%dg", i);
-    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+    if (query_get_value(buf, key, val, sizeof(val)))
       digit_color[i][1] = atoi(val);
     snprintf(key, sizeof(key), "d%db", i);
-    if (httpd_query_key_value(buf, key, val, sizeof(val)) == ESP_OK)
+    if (query_get_value(buf, key, val, sizeof(val)))
       digit_color[i][2] = atoi(val);
   }
-  if (httpd_query_key_value(buf, "dr", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "dr", val, sizeof(val)))
     for (int i = 0; i < 4; i++)
       digit_color[i][0] = atoi(val);
-  if (httpd_query_key_value(buf, "dg", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "dg", val, sizeof(val)))
     for (int i = 0; i < 4; i++)
       digit_color[i][1] = atoi(val);
-  if (httpd_query_key_value(buf, "db", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "db", val, sizeof(val)))
     for (int i = 0; i < 4; i++)
       digit_color[i][2] = atoi(val);
 
   // Lecture des composantes R/G/B barre
-  if (httpd_query_key_value(buf, "br", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "br", val, sizeof(val)))
     bar_color[0] = atoi(val);
-  if (httpd_query_key_value(buf, "bg", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "bg", val, sizeof(val)))
     bar_color[1] = atoi(val);
-  if (httpd_query_key_value(buf, "bb", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "bb", val, sizeof(val)))
     bar_color[2] = atoi(val);
 
   // Lecture des luminosités
-  if (httpd_query_key_value(buf, "bri", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "bri", val, sizeof(val)))
     digit_brightness = atoi(val);
-  if (httpd_query_key_value(buf, "bar_bri", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "bar_bri", val, sizeof(val)))
     bar_brightness = atoi(val);
-  if (httpd_query_key_value(buf, "torch_bri", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "torch_bri", val, sizeof(val)))
     torch_brightness = atoi(val);
-  if (httpd_query_key_value(buf, "blink", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "blink", val, sizeof(val)))
     blink_last_dot = atoi(val);
-  if (httpd_query_key_value(buf, "torch", val, sizeof(val)) == ESP_OK)
+  if (query_get_value(buf, "torch", val, sizeof(val)))
     torch_mode = atoi(val);
 
   // 1) Ouvrir la NVS en lecture/écriture
@@ -380,103 +372,52 @@ static esp_err_t set_get_handler(httpd_req_t *req) {
            digit_color[2][2], digit_color[3][0], digit_color[3][1],
            digit_color[3][2], bar_color[0], bar_color[1], bar_color[2],
            digit_brightness, bar_brightness, torch_brightness);
-
-  httpd_resp_set_status(req, "204 No Content");
-  httpd_resp_send(req, NULL, 0);
-  return ESP_OK;
 }
 
-static httpd_handle_t start_webserver(void) {
-  httpd_config_t config = HTTPD_DEFAULT_CONFIG();
-  httpd_handle_t server = NULL;
-  if (httpd_start(&server, &config) == ESP_OK) {
-    httpd_uri_t index_uri = {
-        .uri = "/", .method = HTTP_GET, .handler = index_get_handler};
-    httpd_register_uri_handler(server, &index_uri);
-    httpd_uri_t set_uri = {
-        .uri = "/set", .method = HTTP_GET, .handler = set_get_handler};
-    httpd_register_uri_handler(server, &set_uri);
-  }
-  return server;
-}
-
-static void wifi_event_handler(void *arg, esp_event_base_t event_base,
-                               int32_t event_id, void *event_data) {
-  if (event_id == WIFI_EVENT_AP_STACONNECTED) {
-    wifi_event_ap_staconnected_t *event =
-        (wifi_event_ap_staconnected_t *)event_data;
-    ESP_LOGI(TAG, "station " MACSTR " join, AID=%d", MAC2STR(event->mac),
-             event->aid);
-  } else if (event_id == WIFI_EVENT_AP_STADISCONNECTED) {
-    wifi_event_ap_stadisconnected_t *event =
-        (wifi_event_ap_stadisconnected_t *)event_data;
-    ESP_LOGI(TAG, "station " MACSTR " leave, AID=%d, reason=%d",
-             MAC2STR(event->mac), event->aid, event->reason);
+static void gatts_event_handler(esp_gatts_cb_event_t event, esp_gatt_if_t gatts_if,
+                                esp_ble_gatts_cb_param_t *param) {
+  if (event == ESP_GATTS_WRITE_EVT && param->write.handle == config_char_handle &&
+      !param->write.is_prep) {
+    char data[128];
+    int len = param->write.len < sizeof(data) - 1 ? param->write.len : sizeof(data) - 1;
+    memcpy(data, param->write.value, len);
+    data[len] = '\0';
+    apply_query_config(data);
+  } else if (event == ESP_GATTS_REG_EVT) {
+    esp_ble_gap_set_device_name("ClockConfig");
+    esp_ble_gap_config_adv_data(&adv_data);
+    esp_ble_gatts_create_service(gatts_if, &service_id, 4);
+  } else if (event == ESP_GATTS_CREATE_EVT) {
+    config_service_handle = param->create.service_handle;
+    esp_ble_gatts_start_service(config_service_handle);
+    esp_ble_gatts_add_char(config_service_handle, &char_uuid, ESP_GATT_PERM_WRITE,
+                           ESP_GATT_CHAR_PROP_BIT_WRITE, NULL, NULL);
+  } else if (event == ESP_GATTS_ADD_CHAR_EVT) {
+    config_char_handle = param->add_char.attr_handle;
+  } else if (event == ESP_GATTS_CONNECT_EVT) {
+    esp_ble_gap_stop_advertising();
+  } else if (event == ESP_GATTS_DISCONNECT_EVT) {
+    esp_ble_gap_start_advertising(&adv_params);
   }
 }
 
-static void wifi_init_softap(void) {
-  wifi_init_config_t cfg = WIFI_INIT_CONFIG_DEFAULT();
-  ESP_ERROR_CHECK(esp_wifi_init(&cfg));
-
-  ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID,
-                                             &wifi_event_handler, NULL));
-
-  wifi_config_t wifi_config = {
-      .ap = {.ssid = EXAMPLE_ESP_WIFI_SSID,
-             .ssid_len = strlen(EXAMPLE_ESP_WIFI_SSID),
-             .password = EXAMPLE_ESP_WIFI_PASS,
-             .max_connection = EXAMPLE_MAX_STA_CONN,
-             .authmode = WIFI_AUTH_WPA_WPA2_PSK},
-  };
-  if (strlen(EXAMPLE_ESP_WIFI_PASS) == 0) {
-    wifi_config.ap.authmode = WIFI_AUTH_OPEN;
+static void gap_event_handler(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t *param) {
+  if (event == ESP_GAP_BLE_ADV_DATA_SET_COMPLETE_EVT) {
+    esp_ble_gap_start_advertising(&adv_params);
   }
-
-  ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_AP));
-  ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_AP, &wifi_config));
-  ESP_ERROR_CHECK(esp_wifi_start());
-
-  esp_netif_ip_info_t ip_info;
-  esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"),
-                        &ip_info);
-
-  char ip_addr[16];
-  inet_ntoa_r(ip_info.ip.addr, ip_addr, 16);
-  ESP_LOGI(TAG, "Set up softAP with IP: %s", ip_addr);
-
-  ESP_LOGI(TAG, "wifi_init_softap finished. SSID:'%s' password:'%s'",
-           EXAMPLE_ESP_WIFI_SSID, EXAMPLE_ESP_WIFI_PASS);
 }
 
-#ifdef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
-static void dhcp_set_captiveportal_url(void) {
-  // get the IP of the access point to redirect to
-  esp_netif_ip_info_t ip_info;
-  esp_netif_get_ip_info(esp_netif_get_handle_from_ifkey("WIFI_AP_DEF"),
-                        &ip_info);
+static void ble_init(void) {
+  esp_bt_controller_config_t bt_cfg = BT_CONTROLLER_INIT_CONFIG_DEFAULT();
+  ESP_ERROR_CHECK(esp_bt_controller_init(&bt_cfg));
+  ESP_ERROR_CHECK(esp_bt_controller_enable(ESP_BT_MODE_BLE));
+  ESP_ERROR_CHECK(esp_bluedroid_init());
+  ESP_ERROR_CHECK(esp_bluedroid_enable());
 
-  char ip_addr[16];
-  inet_ntoa_r(ip_info.ip.addr, ip_addr, 16);
-  ESP_LOGI(TAG, "Set up softAP with IP: %s", ip_addr);
-
-  // turn the IP into a URI
-  char *captiveportal_uri = (char *)malloc(32 * sizeof(char));
-  assert(captiveportal_uri && "Failed to allocate captiveportal_uri");
-  strcpy(captiveportal_uri, "http://");
-  strcat(captiveportal_uri, ip_addr);
-
-  // get a handle to configure DHCP with
-  esp_netif_t *netif = esp_netif_get_handle_from_ifkey("WIFI_AP_DEF");
-
-  // set the DHCP option 114
-  ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_stop(netif));
-  ESP_ERROR_CHECK(esp_netif_dhcps_option(
-      netif, ESP_NETIF_OP_SET, ESP_NETIF_CAPTIVEPORTAL_URI, captiveportal_uri,
-      strlen(captiveportal_uri)));
-  ESP_ERROR_CHECK_WITHOUT_ABORT(esp_netif_dhcps_start(netif));
+  esp_ble_gap_register_callback(gap_event_handler);
+  esp_ble_gatts_register_callback(gatts_event_handler);
+  esp_ble_gatts_app_register(0);
 }
-#endif // CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
 
 void app_main(void) {
   // 1) Initialisation NVS
@@ -531,32 +472,9 @@ void app_main(void) {
     // resteront)
     ESP_LOGW(TAG, "NVS open failed (%s), using defaults", esp_err_to_name(err));
   }
-  esp_log_level_set("httpd_uri", ESP_LOG_ERROR);
-  esp_log_level_set("httpd_txrx", ESP_LOG_ERROR);
-  esp_log_level_set("httpd_parse", ESP_LOG_ERROR);
 
-  // Initialize networking stack
-  ESP_ERROR_CHECK(esp_netif_init());
-
-  // Create default event loop needed by the  main app
   ESP_ERROR_CHECK(esp_event_loop_create_default());
-  // Initialize Wi-Fi including netif with default config
-  esp_netif_create_default_wifi_ap();
-
-  // Initialise ESP32 in SoftAP mode
-  wifi_init_softap();
-
-// Configure DNS-based captive portal, if configured
-#ifdef CONFIG_ESP_ENABLE_DHCP_CAPTIVEPORTAL
-  dhcp_set_captiveportal_url();
-#endif
-
-  // Start the server for the first time
-  start_webserver();
-  // Start the DNS server that will redirect all queries to the softAP IP
-  dns_server_config_t config = DNS_SERVER_CONFIG_SINGLE(
-      "*" /* all A queries */, "WIFI_AP_DEF" /* softAP netif ID */);
-  start_dns_server(&config);
+  ble_init();
   setenv("TZ", "CET-1CEST,M3.5.0/2,M10.5.0/3", 1);
   tzset();
   led_strip_config_t strip_config = {.strip_gpio_num = LED_STRIP_GPIO,
