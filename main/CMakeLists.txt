@@ -1,5 +1,3 @@
 idf_component_register(SRCS "main.c"
-					PRIV_REQUIRES esp_event nvs_flash esp_wifi esp_http_server dns_server driver
-                    INCLUDE_DIRS "."
-                    EMBED_FILES index.html
-                    )
+                    PRIV_REQUIRES esp_event nvs_flash bt driver
+                    INCLUDE_DIRS ".")
